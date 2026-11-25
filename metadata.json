@@ -1,0 +1,6 @@
+{
+  "name": "PustakaKita",
+  "description": "Perpustakaan digital modern dengan peminjaman QR & barcode, pembaca PDF terproteksi di sistem, OPAC buku cetak, inventarisasi aset, dan pemantauan denda otomatis real-time.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

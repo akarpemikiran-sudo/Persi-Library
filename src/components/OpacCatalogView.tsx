@@ -1,19 +1,32 @@
 import React, { useMemo, useState } from 'react';
 import {
+  BookmarkCheck,
+  BookmarkPlus,
   BookOpen,
   Lock,
   QrCode,
   Search,
   Tag,
 } from 'lucide-react';
-import type { BookFormat, BookItem, InventorySummary, UserProfile } from '../lib/types';
+import { isActiveReservation } from '../lib/libraryRules';
+import type {
+  BookFormat,
+  BookItem,
+  InventorySummary,
+  LoanRecord,
+  ReservationRecord,
+  UserProfile,
+} from '../lib/types';
 
 interface OpacCatalogViewProps {
   books: BookItem[];
   summary: InventorySummary;
   user: UserProfile | null;
+  loans: LoanRecord[];
+  reservations: ReservationRecord[];
   onOpenScanner: () => void;
   onBorrowDirect: (book: BookItem) => Promise<void>;
+  onReserveBook: (book: BookItem) => Promise<void>;
   onReadPdf: (book: BookItem) => void;
   onShowLabel: (book: BookItem) => void;
   onOpenAuth: () => void;
@@ -23,8 +36,11 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
   books,
   summary,
   user,
+  loans,
+  reservations,
   onOpenScanner,
   onBorrowDirect,
+  onReserveBook,
   onReadPdf,
   onShowLabel,
   onOpenAuth,
@@ -32,7 +48,7 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
   const [query, setQuery] = useState('');
   const [formatFilter, setFormatFilter] = useState<'all' | BookFormat>('all');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
-  const [borrowingId, setBorrowingId] = useState<string | null>(null);
+  const [busyBookId, setBusyBookId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   const categories = useMemo(() => {
@@ -63,7 +79,7 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
       onOpenAuth();
       return;
     }
-    setBorrowingId(book.id);
+    setBusyBookId(book.id);
     setFeedback(null);
     try {
       await onBorrowDirect(book);
@@ -77,7 +93,30 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
         text: err instanceof Error ? err.message : 'Gagal meminjam buku.',
       });
     } finally {
-      setBorrowingId(null);
+      setBusyBookId(null);
+    }
+  };
+
+  const handleReserveClick = async (book: BookItem) => {
+    if (!user) {
+      onOpenAuth();
+      return;
+    }
+    setBusyBookId(book.id);
+    setFeedback(null);
+    try {
+      await onReserveBook(book);
+      setFeedback({
+        type: 'ok',
+        text: `Reservasi "${book.title}" berhasil dibuat. Status buku kini 'Dipesan' dan Anda akan diberi tahu saat buku kembali.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Gagal memesan buku.',
+      });
+    } finally {
+      setBusyBookId(null);
     }
   };
 
@@ -87,13 +126,13 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
       <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
         <div className="lg:col-span-7 flex flex-col justify-center bg-white border border-slate-200 rounded-2xl p-7 sm:p-10">
           <p className="text-xs font-semibold tracking-wide text-teal-800">
-            Katalog Publik OPAC · Sirkulasi QR &amp; Barcode · Baca PDF Terproteksi
+            Katalog Publik OPAC · Sirkulasi QR &amp; Barcode · Reservasi Buku · Baca PDF Terproteksi
           </p>
           <h1 className="mt-3 text-3xl sm:text-4xl font-extrabold tracking-tight text-slate-900 leading-tight [text-wrap:balance]">
             Perpustakaan Digital Modern dengan Kendali Aset Real-Time
           </h1>
           <p className="mt-4 text-base text-slate-600 leading-relaxed max-w-2xl">
-            Cari ketersediaan buku cetak di rak OPAC, pinjam lebih cepat lewat pemindaian QR dan barcode, baca koleksi PDF langsung di sistem tanpa risiko unduhan ilegal, dan pantau jatuh tempo secara otomatis.
+            Cari ketersediaan buku cetak di rak OPAC, pesan buku yang sedang dipinjam anggota lain, pinjam lebih cepat lewat pemindaian QR dan barcode, dan baca koleksi PDF langsung di sistem tanpa risiko unduhan ilegal.
           </p>
 
           <div className="mt-7 flex flex-wrap items-center gap-3">
@@ -126,7 +165,7 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
             <div className="text-white">
               <p className="text-xs font-mono text-teal-200">SISTEM INVENTARISASI TERPADU</p>
               <p className="mt-1 text-sm font-semibold">
-                Sinkronisasi stok rak fisik, kode QR aset, dan repositori PDF dalam satu layar.
+                Sinkronisasi stok rak fisik, kode QR aset, reservasi anggota, dan repositori PDF dalam satu layar.
               </p>
             </div>
           </div>
@@ -153,7 +192,11 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
               / {summary.totalPhysicalCopies}
             </span>
           </p>
-          <p className="mt-0.5 text-xs text-slate-500">Siap dipinjam di rak</p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {summary.activeReservationsCount > 0
+              ? `${summary.activeReservationsCount} antrean reservasi`
+              : 'Siap dipinjam di rak'}
+          </p>
         </div>
         <div className="px-2 py-1 border-r border-slate-100">
           <p className="text-xs text-slate-500">E-Book PDF Terproteksi</p>
@@ -183,7 +226,7 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
               Katalog OPAC &amp; Koleksi Digital
             </h2>
             <p className="mt-1 text-sm text-slate-600">
-              Telusuri lokasi rak buku cetak, kode aset QR, dan e-book PDF yang siap dibaca di sistem.
+              Telusuri lokasi rak buku cetak, pesan buku yang sedang dipinjam, dan baca e-book PDF langsung di sistem.
             </p>
           </div>
 
@@ -285,6 +328,21 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
             {filteredBooks.map((book) => {
               const isDigitalOnly = book.format === 'digital_pdf';
               const isAvailable = isDigitalOnly || book.availableCopies > 0;
+              const activeResCount = book.activeReservationsCount ?? 0;
+
+              const userHasActiveLoan = Boolean(
+                user &&
+                  loans.some(
+                    (l) => l.bookId === book.id && l.memberId === user.id && l.status === 'active'
+                  )
+              );
+              const userHasActiveReservation = Boolean(
+                user &&
+                  reservations.some(
+                    (r) =>
+                      r.bookId === book.id && r.memberId === user.id && isActiveReservation(r)
+                  )
+              );
 
               return (
                 <article
@@ -328,7 +386,7 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
                   </div>
 
                   <div className="pt-3 border-t border-slate-100 space-y-3">
-                    <div className="flex items-center justify-between text-xs">
+                    <div className="flex items-center justify-between gap-2 text-xs">
                       <span
                         className={`font-semibold tabular-nums ${
                           isAvailable ? 'text-emerald-700' : 'text-amber-700'
@@ -337,10 +395,14 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
                         {isDigitalOnly
                           ? `Akses Penuh (${book.pageCount || 'PDF'} hal · Terproteksi)`
                           : isAvailable
-                            ? `Tersedia ${book.availableCopies} dari ${book.totalCopies} eks`
-                            : 'Sedang Dipinjam Semua'}
+                            ? `Tersedia ${book.availableCopies} dari ${book.totalCopies} eks${
+                                activeResCount > 0 ? ` · ${activeResCount} Dipesan` : ''
+                              }`
+                            : activeResCount > 0
+                              ? `Sedang Dipinjam · Dipesan (${activeResCount})`
+                              : 'Sedang Dipinjam Semua'}
                       </span>
-                      <span className="font-mono text-[11px] text-slate-400">
+                      <span className="font-mono text-[11px] text-slate-400 shrink-0">
                         ISBN {book.isbn}
                       </span>
                     </div>
@@ -356,19 +418,48 @@ export const OpacCatalogView: React.FC<OpacCatalogViewProps> = ({
                           Baca di Sistem
                         </button>
                       )}
-                      {!isDigitalOnly && (
+                      {!isDigitalOnly && isAvailable && (
                         <button
                           type="button"
-                          disabled={!isAvailable || borrowingId === book.id}
+                          disabled={busyBookId === book.id || userHasActiveLoan}
                           onClick={() => void handleBorrowClick(book)}
                           className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800 disabled:opacity-45 transition-colors whitespace-nowrap"
                         >
                           <QrCode className="w-3.5 h-3.5" />
-                          {borrowingId === book.id
+                          {busyBookId === book.id
                             ? 'Meminjam...'
-                            : isAvailable
-                              ? 'Pinjam Buku'
-                              : 'Stok Habis'}
+                            : userHasActiveLoan
+                              ? 'Sedang Dipinjam'
+                              : 'Pinjam Buku'}
+                        </button>
+                      )}
+                      {!isDigitalOnly && !isAvailable && (
+                        <button
+                          type="button"
+                          disabled={
+                            busyBookId === book.id ||
+                            userHasActiveLoan ||
+                            userHasActiveReservation
+                          }
+                          onClick={() => void handleReserveClick(book)}
+                          className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold transition-colors whitespace-nowrap ${
+                            userHasActiveReservation || userHasActiveLoan
+                              ? 'border border-amber-300 bg-amber-50 text-amber-900 opacity-85'
+                              : 'bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50'
+                          }`}
+                        >
+                          {userHasActiveReservation ? (
+                            <BookmarkCheck className="w-3.5 h-3.5" />
+                          ) : (
+                            <BookmarkPlus className="w-3.5 h-3.5" />
+                          )}
+                          {busyBookId === book.id
+                            ? 'Memesan...'
+                            : userHasActiveLoan
+                              ? 'Sedang Anda Pinjam'
+                              : userHasActiveReservation
+                                ? 'Sudah Dipesan'
+                                : 'Pesan Buku'}
                         </button>
                       )}
                       <button

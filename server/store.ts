@@ -3,10 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import {
+  canReserveBook,
   DEFAULT_LOAN_DAYS,
   evaluateLoan,
   FINE_RATE_PER_DAY,
   formatRupiah,
+  isActiveReservation,
+  isAdminRole,
 } from '../src/lib/libraryRules';
 import type {
   AssetCondition,
@@ -14,6 +17,7 @@ import type {
   BookItem,
   LibraryNotification,
   LoanRecord,
+  ReservationRecord,
   UserProfile,
   UserRole,
 } from '../src/lib/types';
@@ -30,8 +34,10 @@ export interface LibraryDatabase {
   users: StoredUser[];
   books: StoredBook[];
   loans: LoanRecord[];
+  reservations: ReservationRecord[];
   notifications: LibraryNotification[];
   adminClaimed: boolean;
+  superAdminClaimed: boolean;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -332,8 +338,8 @@ function buildSeedDatabase(now: Date): LibraryDatabase {
       format: 'print',
       rackLocation: 'Rak D-03',
       condition: 'Perlu Perawatan',
-      totalCopies: 3,
-      availableCopies: 2,
+      totalCopies: 2,
+      availableCopies: 0,
       coverUrl: '/src/assets/images/cover_arsitektur_nusantara_1795609545740.jpg',
       hasPdf: false,
       pdfFileName: null,
@@ -439,6 +445,54 @@ function buildSeedDatabase(now: Date): LibraryDatabase {
       finePaid: 0,
       loanQrToken: 'PK-LOAN:ln-seed-03',
     },
+    {
+      id: 'ln-seed-04',
+      bookId: 'bk-ekonomi-05',
+      bookTitle: 'Ekonomi Sirkular & Inovasi Daerah',
+      bookAssetCode: 'AST-2026-005',
+      bookBarcode: '9786024815189',
+      memberId: 'usr-hist-1',
+      memberName: 'Raka Pratama',
+      memberCode: 'PK-M-1001',
+      borrowedAt: new Date(now.getTime() - 4 * dayMs).toISOString(),
+      dueAt: new Date(now.getTime() + 3 * dayMs).toISOString(),
+      returnedAt: null,
+      status: 'active',
+      finePaid: 0,
+      loanQrToken: 'PK-LOAN:ln-seed-04',
+    },
+    {
+      id: 'ln-seed-05',
+      bookId: 'bk-ekonomi-05',
+      bookTitle: 'Ekonomi Sirkular & Inovasi Daerah',
+      bookAssetCode: 'AST-2026-005',
+      bookBarcode: '9786024815189',
+      memberId: 'usr-hist-2',
+      memberName: 'Siti Nurhaliza',
+      memberCode: 'PK-M-1002',
+      borrowedAt: new Date(now.getTime() - 3 * dayMs).toISOString(),
+      dueAt: new Date(now.getTime() + 4 * dayMs).toISOString(),
+      returnedAt: null,
+      status: 'active',
+      finePaid: 0,
+      loanQrToken: 'PK-LOAN:ln-seed-05',
+    },
+  ];
+
+  const reservations: ReservationRecord[] = [
+    {
+      id: 'res-seed-01',
+      bookId: 'bk-ekonomi-05',
+      bookTitle: 'Ekonomi Sirkular & Inovasi Daerah',
+      bookAssetCode: 'AST-2026-005',
+      rackLocation: 'Rak D-03',
+      memberId: 'usr-hist-2',
+      memberName: 'Siti Nurhaliza',
+      memberCode: 'PK-M-1002',
+      reservedAt: new Date(now.getTime() - 5 * 3600 * 1000).toISOString(),
+      status: 'waiting',
+      notifiedReadyAt: null,
+    },
   ];
 
   const notifications: LibraryNotification[] = [
@@ -474,8 +528,10 @@ function buildSeedDatabase(now: Date): LibraryDatabase {
     users,
     books,
     loans,
+    reservations,
     notifications,
     adminClaimed: false,
+    superAdminClaimed: false,
   };
 }
 
@@ -490,7 +546,12 @@ class LibraryStore {
     if (fs.existsSync(DB_FILE)) {
       try {
         const raw = fs.readFileSync(DB_FILE, 'utf8');
-        this.db = JSON.parse(raw) as LibraryDatabase;
+        const parsed = JSON.parse(raw) as LibraryDatabase;
+        this.db = {
+          ...parsed,
+          reservations: Array.isArray(parsed.reservations) ? parsed.reservations : [],
+          superAdminClaimed: Boolean(parsed.superAdminClaimed),
+        };
       } catch {
         this.db = buildSeedDatabase(new Date());
         this.save();
@@ -598,21 +659,56 @@ class LibraryStore {
     return Boolean(process.env.ADMIN_PASSCODE && process.env.ADMIN_PASSCODE.trim().length > 0);
   }
 
-  isAdminClaimed(): boolean {
+  isSuperAdminClaimed(): boolean {
     if (this.isAdminEnvConfigured()) return true;
-    return this.db.adminClaimed && this.db.users.some((u) => u.role === 'admin');
+    return (
+      this.db.superAdminClaimed &&
+      this.db.users.some((u) => u.role === 'super_admin')
+    );
   }
 
-  claimFirstAdmin(name: string, email: string, password: string): UserProfile {
-    if (this.isAdminClaimed()) {
-      throw new Error('ADMIN_ALREADY_CLAIMED');
+  isAdminClaimed(): boolean {
+    return this.isSuperAdminClaimed() || (this.db.adminClaimed && this.db.users.some((u) => isAdminRole(u.role)));
+  }
+
+  registerFirstSuperAdmin(name: string, email: string, password: string): UserProfile {
+    if (this.isSuperAdminClaimed()) {
+      throw new Error('SUPER_ADMIN_ALREADY_CLAIMED');
     }
     const cleanEmail = email.trim().toLowerCase();
-    const adminUser: StoredUser = {
-      id: `usr-admin-${crypto.randomUUID().slice(0, 8)}`,
+    const existing = this.db.users.find((u) => u.email.toLowerCase() === cleanEmail);
+    if (existing) {
+      throw new Error('EMAIL_EXISTS');
+    }
+    const superAdmin: StoredUser = {
+      id: `usr-sadm-${crypto.randomUUID().slice(0, 8)}`,
       name: name.trim(),
       email: cleanEmail,
-      memberCode: 'PK-ADM-001',
+      memberCode: 'PK-SADM-001',
+      role: 'super_admin',
+      passwordHash: hashPassword(password),
+      createdAt: new Date().toISOString(),
+    };
+    this.db.users.push(superAdmin);
+    this.db.superAdminClaimed = true;
+    this.db.adminClaimed = true;
+    this.save();
+    this.broadcast('library_update', { kind: 'super_admin_registered' });
+    return this.sanitizeUser(superAdmin);
+  }
+
+  createStaffAdmin(name: string, email: string, password: string): UserProfile {
+    const cleanEmail = email.trim().toLowerCase();
+    const existing = this.db.users.find((u) => u.email.toLowerCase() === cleanEmail);
+    if (existing) {
+      throw new Error('EMAIL_EXISTS');
+    }
+    const adminCount = this.db.users.filter((u) => u.role === 'admin').length + 1;
+    const adminUser: StoredUser = {
+      id: `usr-adm-${crypto.randomUUID().slice(0, 8)}`,
+      name: name.trim(),
+      email: cleanEmail,
+      memberCode: `PK-ADM-${String(adminCount).padStart(3, '0')}`,
       role: 'admin',
       passwordHash: hashPassword(password),
       createdAt: new Date().toISOString(),
@@ -620,7 +716,14 @@ class LibraryStore {
     this.db.users.push(adminUser);
     this.db.adminClaimed = true;
     this.save();
+    this.broadcast('library_update', { kind: 'staff_admin_created' });
     return this.sanitizeUser(adminUser);
+  }
+
+  getStaffAdmins(): UserProfile[] {
+    return this.db.users
+      .filter((u) => isAdminRole(u.role))
+      .map((u) => this.sanitizeUser(u));
   }
 
   registerMember(name: string, email: string, password: string): UserProfile {
@@ -645,36 +748,39 @@ class LibraryStore {
     return this.sanitizeUser(memberUser);
   }
 
-  authenticateUser(email: string, password: string, role: UserRole): UserProfile | null {
+  authenticateUser(email: string, password: string, roleGroup: 'admin' | 'member'): UserProfile | null {
     const cleanEmail = email.trim().toLowerCase();
 
-    if (role === 'admin' && this.isAdminEnvConfigured()) {
+    if (roleGroup === 'admin' && this.isAdminEnvConfigured()) {
       const envPass = process.env.ADMIN_PASSCODE!.trim();
       const passBuf = Buffer.from(password);
       const envBuf = Buffer.from(envPass);
       if (passBuf.length === envBuf.length && crypto.timingSafeEqual(passBuf, envBuf)) {
-        let admin = this.db.users.find((u) => u.role === 'admin');
-        if (!admin) {
-          admin = {
-            id: 'usr-admin-env',
-            name: 'Pustakawan Utama',
-            email: cleanEmail || 'admin@pustakakita.id',
-            memberCode: 'PK-ADM-001',
-            role: 'admin',
+        let superAdmin = this.db.users.find((u) => isAdminRole(u.role));
+        if (!superAdmin) {
+          superAdmin = {
+            id: 'usr-sadm-env',
+            name: 'Super Admin Pustaka',
+            email: cleanEmail || 'superadmin@pustakakita.id',
+            memberCode: 'PK-SADM-001',
+            role: 'super_admin',
             passwordHash: null,
             createdAt: new Date().toISOString(),
           };
-          this.db.users.push(admin);
+          this.db.users.push(superAdmin);
+          this.db.superAdminClaimed = true;
+          this.db.adminClaimed = true;
           this.save();
         }
-        return this.sanitizeUser(admin);
+        return this.sanitizeUser(superAdmin);
       }
-      return null;
     }
 
-    const user = this.db.users.find(
-      (u) => u.email.toLowerCase() === cleanEmail && u.role === role
-    );
+    const user = this.db.users.find((u) => {
+      if (u.email.toLowerCase() !== cleanEmail) return false;
+      if (roleGroup === 'admin') return isAdminRole(u.role);
+      return u.role === 'member';
+    });
     if (!user) return null;
     if (!verifyPassword(password, user.passwordHash)) return null;
     return this.sanitizeUser(user);
@@ -691,7 +797,15 @@ class LibraryStore {
   }
 
   getBooks(): BookItem[] {
-    return this.db.books.map(({ pdfFileName: _, ...book }) => book);
+    return this.db.books.map(({ pdfFileName: _, ...book }) => {
+      const activeReservationsCount = this.db.reservations.filter(
+        (r) => r.bookId === book.id && isActiveReservation(r)
+      ).length;
+      return {
+        ...book,
+        activeReservationsCount,
+      };
+    });
   }
 
   getStoredBook(bookId: string): StoredBook | null {
@@ -811,7 +925,7 @@ class LibraryStore {
   }
 
   getLoansForUser(user: UserProfile): LoanRecord[] {
-    if (user.role === 'admin') {
+    if (isAdminRole(user.role)) {
       return [...this.db.loans].sort(
         (a, b) => new Date(b.borrowedAt).getTime() - new Date(a.borrowedAt).getTime()
       );
@@ -819,6 +933,79 @@ class LibraryStore {
     return this.db.loans
       .filter((l) => l.memberId === user.id)
       .sort((a, b) => new Date(b.borrowedAt).getTime() - new Date(a.borrowedAt).getTime());
+  }
+
+  getReservationsForUser(user: UserProfile): ReservationRecord[] {
+    if (isAdminRole(user.role)) {
+      return [...this.db.reservations].sort(
+        (a, b) => new Date(b.reservedAt).getTime() - new Date(a.reservedAt).getTime()
+      );
+    }
+    return this.db.reservations
+      .filter((r) => r.memberId === user.id)
+      .sort((a, b) => new Date(b.reservedAt).getTime() - new Date(a.reservedAt).getTime());
+  }
+
+  reserveBook(bookId: string, member: UserProfile): ReservationRecord {
+    const book = this.db.books.find((b) => b.id === bookId);
+    if (!book) throw new Error('BOOK_NOT_FOUND');
+
+    const check = canReserveBook(book, this.db.loans, this.db.reservations, member.id);
+    if (!check.allowed) {
+      throw new Error(check.reason || 'RESERVATION_NOT_ALLOWED');
+    }
+
+    const reservation: ReservationRecord = {
+      id: `res-${crypto.randomUUID().slice(0, 8)}`,
+      bookId: book.id,
+      bookTitle: book.title,
+      bookAssetCode: book.assetCode,
+      rackLocation: book.rackLocation,
+      memberId: member.id,
+      memberName: member.name,
+      memberCode: member.memberCode,
+      reservedAt: new Date().toISOString(),
+      status: 'waiting',
+      notifiedReadyAt: null,
+    };
+
+    this.db.reservations.unshift(reservation);
+
+    this.pushNotification({
+      userId: member.id,
+      targetRole: 'admin',
+      type: 'reservation',
+      title: 'Reservasi Buku Baru',
+      message: `${member.name} (${member.memberCode}) memesan "${book.title}" (${book.assetCode}) yang sedang dipinjam.`,
+      bookId: book.id,
+    });
+
+    this.save();
+    this.broadcast('library_update', {
+      kind: 'reservation_created',
+      reservationId: reservation.id,
+      bookId: book.id,
+    });
+    return reservation;
+  }
+
+  cancelReservation(reservationId: string, actor: UserProfile): ReservationRecord {
+    const reservation = this.db.reservations.find((r) => r.id === reservationId);
+    if (!reservation) throw new Error('RESERVATION_NOT_FOUND');
+    if (!isAdminRole(actor.role) && reservation.memberId !== actor.id) {
+      throw new Error('FORBIDDEN');
+    }
+    if (!isActiveReservation(reservation)) {
+      throw new Error('RESERVATION_INACTIVE');
+    }
+    reservation.status = 'cancelled';
+    this.save();
+    this.broadcast('library_update', {
+      kind: 'reservation_cancelled',
+      reservationId: reservation.id,
+      bookId: reservation.bookId,
+    });
+    return reservation;
   }
 
   borrowBook(bookId: string, borrower: UserProfile, loanDays: number = DEFAULT_LOAN_DAYS): LoanRecord {
@@ -864,6 +1051,17 @@ class LibraryStore {
     book.availableCopies = Math.max(0, book.availableCopies - 1);
     this.db.loans.unshift(loan);
 
+    // Fulfill any active reservation held by this borrower for this book
+    const matchingRes = this.db.reservations.find(
+      (r) =>
+        r.bookId === book.id &&
+        r.memberId === borrower.id &&
+        isActiveReservation(r)
+    );
+    if (matchingRes) {
+      matchingRes.status = 'fulfilled';
+    }
+
     this.pushNotification({
       userId: borrower.id,
       type: 'borrow',
@@ -881,7 +1079,7 @@ class LibraryStore {
   returnLoan(loanId: string, actor: UserProfile): { loan: LoanRecord; fineDue: number } {
     const loan = this.db.loans.find((l) => l.id === loanId);
     if (!loan) throw new Error('LOAN_NOT_FOUND');
-    if (actor.role !== 'admin' && loan.memberId !== actor.id) {
+    if (!isAdminRole(actor.role) && loan.memberId !== actor.id) {
       throw new Error('FORBIDDEN');
     }
     if (loan.status === 'returned') {
@@ -896,6 +1094,26 @@ class LibraryStore {
     const book = this.db.books.find((b) => b.id === loan.bookId);
     if (book && book.format !== 'digital_pdf') {
       book.availableCopies = Math.min(book.totalCopies, book.availableCopies + 1);
+    }
+
+    // Advance earliest waiting reservation for this book to 'ready'
+    const waitingQueue = this.db.reservations
+      .filter((r) => r.bookId === loan.bookId && r.status === 'waiting')
+      .sort((a, b) => new Date(a.reservedAt).getTime() - new Date(b.reservedAt).getTime());
+
+    if (waitingQueue.length > 0) {
+      const nextReservation = waitingQueue[0];
+      nextReservation.status = 'ready';
+      nextReservation.notifiedReadyAt = now.toISOString();
+      const readyNotif = this.pushNotification({
+        userId: nextReservation.memberId,
+        targetRole: 'admin',
+        type: 'reservation',
+        title: 'Buku Reservasi Siap Diambil',
+        message: `"${nextReservation.bookTitle}" yang dipesan oleh ${nextReservation.memberName} (${nextReservation.memberCode}) telah kembali dan siap diambil di ${nextReservation.rackLocation}.`,
+        bookId: nextReservation.bookId,
+      });
+      this.broadcast('notification_push', { count: 1, notifications: [readyNotif] });
     }
 
     this.pushNotification({
@@ -918,7 +1136,7 @@ class LibraryStore {
   payLoanFine(loanId: string, actor: UserProfile): LoanRecord {
     const loan = this.db.loans.find((l) => l.id === loanId);
     if (!loan) throw new Error('LOAN_NOT_FOUND');
-    if (actor.role !== 'admin' && loan.memberId !== actor.id) {
+    if (!isAdminRole(actor.role) && loan.memberId !== actor.id) {
       throw new Error('FORBIDDEN');
     }
 
@@ -1044,7 +1262,7 @@ class LibraryStore {
   }
 
   getNotificationsForUser(user: UserProfile): LibraryNotification[] {
-    if (user.role === 'admin') {
+    if (isAdminRole(user.role)) {
       return this.db.notifications.slice(0, 50);
     }
     return this.db.notifications.filter((n) => n.userId === user.id).slice(0, 50);
@@ -1053,7 +1271,7 @@ class LibraryStore {
   markNotificationRead(notifId: string, user: UserProfile): boolean {
     const notif = this.db.notifications.find((n) => n.id === notifId);
     if (!notif) return false;
-    if (user.role !== 'admin' && notif.userId !== user.id) return false;
+    if (!isAdminRole(user.role) && notif.userId !== user.id) return false;
     notif.read = true;
     this.save();
     return true;
@@ -1061,7 +1279,7 @@ class LibraryStore {
 
   markAllNotificationsRead(user: UserProfile): void {
     for (const notif of this.db.notifications) {
-      if (user.role === 'admin' || notif.userId === user.id) {
+      if (isAdminRole(user.role) || notif.userId === user.id) {
         notif.read = true;
       }
     }

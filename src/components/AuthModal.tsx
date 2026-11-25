@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Lock, Shield, UserCheck, X } from 'lucide-react';
+import { Lock, Shield, ShieldPlus, UserCheck, X } from 'lucide-react';
 import type { UserProfile } from '../lib/types';
 
 interface AuthModalProps {
@@ -19,8 +19,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [memberMode, setMemberMode] = useState<'login' | 'register'>('login');
   const [adminStatus, setAdminStatus] = useState<{
     claimed: boolean;
+    superAdminClaimed: boolean;
     envConfigured: boolean;
-  }>({ claimed: true, envConfigured: false });
+    loaded: boolean;
+  }>({ claimed: false, superAdminClaimed: false, envConfigured: false, loaded: false });
 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -37,17 +39,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setError(null);
     fetch('/api/auth/admin-status')
       .then((r) => r.json())
-      .then((data: { claimed: boolean; envConfigured: boolean }) => {
-        setAdminStatus(data);
+      .then((data: { claimed: boolean; superAdminClaimed?: boolean; envConfigured: boolean }) => {
+        setAdminStatus({
+          claimed: Boolean(data.claimed),
+          superAdminClaimed: Boolean(data.superAdminClaimed ?? data.claimed),
+          envConfigured: Boolean(data.envConfigured),
+          loaded: true,
+        });
       })
       .catch(() => {
-        // Ignore network transient
+        setAdminStatus((prev) => ({ ...prev, loaded: true }));
       });
   }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const isFirstRunAdminSetup = roleTab === 'admin' && !adminStatus.claimed;
+  const isSuperAdminRegistrationRequired =
+    roleTab === 'admin' && adminStatus.loaded && !adminStatus.superAdminClaimed;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,8 +70,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         role: roleTab,
       };
 
-      if (isFirstRunAdminSetup) {
-        endpoint = '/api/auth/admin-claim';
+      if (isSuperAdminRegistrationRequired) {
+        endpoint = '/api/auth/super-admin-register';
         body = { name, email, password };
       } else if (roleTab === 'member' && memberMode === 'register') {
         endpoint = '/api/auth/register';
@@ -107,10 +115,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 id="auth-modal-title" className="text-xl font-bold text-slate-900">
-              Masuk ke PustakaKita
+              {isSuperAdminRegistrationRequired
+                ? 'Daftar Akun Super Admin'
+                : 'Masuk ke PustakaKita'}
             </h2>
             <p className="mt-1 text-sm text-slate-600">
-              Akses peminjaman QR, pembaca PDF terproteksi, atau dasbor pengelola.
+              {isSuperAdminRegistrationRequired
+                ? 'Langkah awal wajib sebelum masuk ke Dasbor Admin perpustakaan.'
+                : 'Akses peminjaman QR, pembaca PDF terproteksi, atau dasbor pengelola.'}
             </p>
           </div>
           <button
@@ -175,20 +187,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </div>
         )}
 
-        {isFirstRunAdminSetup && (
+        {isSuperAdminRegistrationRequired && (
           <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50 p-3.5 text-xs text-teal-900">
-            <p className="font-semibold">Aktivasi Admin Pertama</p>
-            <p className="mt-1 text-teal-800">
-              Belum ada akun admin yang diaktivasi. Tetapkan email dan kata sandi admin pertama untuk mengamankan dasbor pengelola.
+            <div className="flex items-center gap-2 font-semibold">
+              <ShieldPlus className="w-4 h-4 text-teal-700 shrink-0" />
+              <span>Buat Akun Super Admin Terlebih Dahulu</span>
+            </div>
+            <p className="mt-1 text-teal-800 leading-relaxed">
+              Belum ada akun Super Admin di sistem ini. Daftarkan akun Super Admin utama terlebih dahulu untuk membuka akses Dasbor Admin dan mengelola akun staf pustakawan lainnya.
             </p>
           </div>
         )}
 
+        {roleTab === 'admin' && adminStatus.loaded && adminStatus.superAdminClaimed && (
+          <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-600">
+            Masuk menggunakan kredensial <span className="font-semibold text-slate-800">Super Admin</span> atau akun <span className="font-semibold text-slate-800">Admin Staf</span> yang telah didaftarkan.
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="mt-4 space-y-3.5">
-          {(isFirstRunAdminSetup || (roleTab === 'member' && memberMode === 'register')) && (
+          {(isSuperAdminRegistrationRequired ||
+            (roleTab === 'member' && memberMode === 'register')) && (
             <div>
               <label htmlFor="auth-name" className="block text-xs font-medium text-slate-700 mb-1">
-                Nama Lengkap
+                {isSuperAdminRegistrationRequired ? 'Nama Super Admin' : 'Nama Lengkap'}
               </label>
               <input
                 id="auth-name"
@@ -196,7 +218,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 required
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder={roleTab === 'admin' ? 'Nama Pustakawan' : 'Nama Anggota'}
+                placeholder={
+                  isSuperAdminRegistrationRequired ? 'Kepala Perpustakaan / Super Admin' : 'Nama Anggota'
+                }
                 className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
             </div>
@@ -214,7 +238,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder={
-                  roleTab === 'admin' ? 'admin@pustakakita.id' : 'anggota@email.com'
+                  isSuperAdminRegistrationRequired
+                    ? 'superadmin@pustakakita.id'
+                    : roleTab === 'admin'
+                      ? 'admin@pustakakita.id'
+                      : 'anggota@email.com'
                 }
                 className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
@@ -253,13 +281,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || (roleTab === 'admin' && !adminStatus.loaded)}
             className="w-full rounded-lg bg-teal-700 py-2.5 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-50 transition-colors"
           >
             {loading
               ? 'Memverifikasi...'
-              : isFirstRunAdminSetup
-                ? 'Aktivasi & Masuk Admin'
+              : isSuperAdminRegistrationRequired
+                ? 'Daftar Akun Super Admin & Masuk'
                 : roleTab === 'admin'
                   ? 'Masuk Dasbor Admin'
                   : memberMode === 'register'

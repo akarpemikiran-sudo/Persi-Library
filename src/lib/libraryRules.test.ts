@@ -1,15 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canReserveBook,
   computeInventorySummary,
   evaluateLoan,
   FINE_RATE_PER_DAY,
   formatRupiah,
+  isAdminRole,
   matchBookByScan,
   parseBooksCsv,
   parseScanPayload,
 } from './libraryRules';
-import type { BookItem, LoanRecord } from './types';
+import type { BookItem, LoanRecord, ReservationRecord } from './types';
 
 test('evaluateLoan computes nominal, due_soon, overdue fines, and returned states accurately', () => {
   const now = new Date('2026-11-25T10:00:00.000Z');
@@ -173,7 +175,23 @@ test('computeInventorySummary aggregates physical copies, digital titles, and ou
     },
   ];
 
-  const summary = computeInventorySummary(books, loans, now);
+  const reservations: ReservationRecord[] = [
+    {
+      id: 'res-1',
+      bookId: 'bk-1',
+      bookTitle: 'Buku Cetak',
+      bookAssetCode: 'AST-1',
+      rackLocation: 'Rak A-01',
+      memberId: 'm-2',
+      memberName: 'Siti',
+      memberCode: 'PK-M-002',
+      reservedAt: '2026-11-24T10:00:00.000Z',
+      status: 'waiting',
+      notifiedReadyAt: null,
+    },
+  ];
+
+  const summary = computeInventorySummary(books, loans, now, reservations);
   assert.equal(summary.totalTitles, 2);
   assert.equal(summary.totalPhysicalCopies, 5);
   assert.equal(summary.availablePhysicalCopies, 3);
@@ -182,5 +200,44 @@ test('computeInventorySummary aggregates physical copies, digital titles, and ou
   assert.equal(summary.activeLoansCount, 1);
   assert.equal(summary.overdueLoansCount, 1);
   assert.equal(summary.totalOutstandingFines, 4000);
+  assert.equal(summary.activeReservationsCount, 1);
+  assert.equal(summary.reservedBooksCount, 1);
   assert.equal(formatRupiah(summary.totalOutstandingFines), 'Rp 4.000');
 });
+
+test('canReserveBook and isAdminRole enforce reservation rules and super_admin permissions', () => {
+  assert.equal(isAdminRole('super_admin'), true);
+  assert.equal(isAdminRole('admin'), true);
+  assert.equal(isAdminRole('member'), false);
+
+  const outOfStockBook = { id: 'bk-9', format: 'print' as const, availableCopies: 0 };
+  const inStockBook = { id: 'bk-10', format: 'print' as const, availableCopies: 2 };
+  const digitalBook = { id: 'bk-11', format: 'digital_pdf' as const, availableCopies: 999 };
+
+  assert.equal(canReserveBook(inStockBook, [], [], 'm-1').allowed, false);
+  assert.equal(canReserveBook(digitalBook, [], [], 'm-1').allowed, false);
+  assert.equal(canReserveBook(outOfStockBook, [], [], 'm-1').allowed, true);
+
+  // Member already borrowing cannot reserve
+  assert.equal(
+    canReserveBook(
+      outOfStockBook,
+      [{ bookId: 'bk-9', memberId: 'm-1', status: 'active' }],
+      [],
+      'm-1'
+    ).allowed,
+    false
+  );
+
+  // Member who already has active reservation cannot double-reserve
+  assert.equal(
+    canReserveBook(
+      outOfStockBook,
+      [],
+      [{ bookId: 'bk-9', memberId: 'm-1', status: 'waiting' }],
+      'm-1'
+    ).allowed,
+    false
+  );
+});
+

@@ -5,7 +5,13 @@ import type {
   InventorySummary,
   LoanEvaluation,
   LoanRecord,
+  ReservationRecord,
+  UserRole,
 } from './types';
+
+export function isAdminRole(role?: UserRole | null): boolean {
+  return role === 'admin' || role === 'super_admin';
+}
 
 export const FINE_RATE_PER_DAY = 2000; // Rp 2.000 per hari keterlambatan
 export const DEFAULT_LOAN_DAYS = 7;
@@ -331,10 +337,57 @@ export function parseBooksCsv(csvText: string): CsvParseResult {
   return { validBooks, errors };
 }
 
+export function isActiveReservation(reservation: Pick<ReservationRecord, 'status'>): boolean {
+  return reservation.status === 'waiting' || reservation.status === 'ready';
+}
+
+export function canReserveBook(
+  book: Pick<BookItem, 'id' | 'format' | 'availableCopies'>,
+  loans: Pick<LoanRecord, 'bookId' | 'memberId' | 'status'>[],
+  reservations: Pick<ReservationRecord, 'bookId' | 'memberId' | 'status'>[],
+  memberId?: string | null
+): { allowed: boolean; reason?: string } {
+  if (book.format === 'digital_pdf') {
+    return {
+      allowed: false,
+      reason: 'Koleksi Digital PDF dapat langsung dibaca tanpa reservasi.',
+    };
+  }
+  if (book.availableCopies > 0) {
+    return {
+      allowed: false,
+      reason: 'Buku masih tersedia di rak dan dapat langsung dipinjam.',
+    };
+  }
+  if (memberId) {
+    const hasOwnLoan = loans.some(
+      (l) => l.bookId === book.id && l.memberId === memberId && l.status === 'active'
+    );
+    if (hasOwnLoan) {
+      return {
+        allowed: false,
+        reason: 'Anda sedang meminjam buku ini.',
+      };
+    }
+    const alreadyReserved = reservations.some(
+      (r) =>
+        r.bookId === book.id && r.memberId === memberId && isActiveReservation(r)
+    );
+    if (alreadyReserved) {
+      return {
+        allowed: false,
+        reason: 'Anda sudah memiliki reservasi aktif untuk buku ini.',
+      };
+    }
+  }
+  return { allowed: true };
+}
+
 export function computeInventorySummary(
   books: BookItem[],
   loans: LoanRecord[],
-  now: Date = new Date()
+  now: Date = new Date(),
+  reservations: ReservationRecord[] = []
 ): InventorySummary {
   let totalPhysicalCopies = 0;
   let availablePhysicalCopies = 0;
@@ -371,6 +424,9 @@ export function computeInventorySummary(
     totalOutstandingFines += evalResult.unpaidFine;
   }
 
+  const activeReservations = reservations.filter(isActiveReservation);
+  const reservedBookIds = new Set(activeReservations.map((r) => r.bookId));
+
   return {
     totalTitles: books.length,
     totalPhysicalCopies,
@@ -380,6 +436,9 @@ export function computeInventorySummary(
     activeLoansCount,
     overdueLoansCount,
     totalOutstandingFines,
+    activeReservationsCount: activeReservations.length,
+    reservedBooksCount: reservedBookIds.size,
     conditionCounts,
   };
 }
+

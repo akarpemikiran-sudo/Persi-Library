@@ -9,12 +9,13 @@ import { OfflineIndicator, PWAInstallButton } from './components/PwaControls';
 import { AssetLabelModal } from './components/QrAndBarcodeVisuals';
 import { QrBarcodeScannerModal } from './components/QrBarcodeScannerModal';
 import { usePushNotifications } from './hooks/usePushNotifications';
-import { computeInventorySummary } from './lib/libraryRules';
+import { computeInventorySummary, isAdminRole } from './lib/libraryRules';
 import type {
   BookItem,
   InventorySummary,
   LibraryNotification,
   LoanRecord,
+  ReservationRecord,
   UserProfile,
 } from './lib/types';
 
@@ -35,6 +36,8 @@ const EMPTY_SUMMARY: InventorySummary = {
   activeLoansCount: 0,
   overdueLoansCount: 0,
   totalOutstandingFines: 0,
+  activeReservationsCount: 0,
+  reservedBooksCount: 0,
   conditionCounts: { Baik: 0, 'Perlu Perawatan': 0, Rusak: 0 },
 };
 
@@ -47,8 +50,10 @@ export default function App() {
   const [books, setBooks] = useState<BookItem[]>([]);
   const [summary, setSummary] = useState<InventorySummary>(EMPTY_SUMMARY);
   const [loans, setLoans] = useState<LoanRecord[]>([]);
+  const [reservations, setReservations] = useState<ReservationRecord[]>([]);
   const [notifications, setNotifications] = useState<LibraryNotification[]>([]);
   const [members, setMembers] = useState<MemberSummaryRow[]>([]);
+  const [staffAdmins, setStaffAdmins] = useState<UserProfile[]>([]);
   const [loadingCatalog, setLoadingCatalog] = useState(true);
 
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -79,8 +84,9 @@ export default function App() {
     if (!token || !user) return;
     const headers = { Authorization: `Bearer ${token}` };
 
-    const [loansRes, notifsRes] = await Promise.all([
+    const [loansRes, reservationsRes, notifsRes] = await Promise.all([
       fetch('/api/loans', { headers }),
+      fetch('/api/reservations', { headers }),
       fetch('/api/notifications', { headers }),
     ]);
 
@@ -88,16 +94,27 @@ export default function App() {
       const lData = (await loansRes.json()) as { loans: LoanRecord[] };
       setLoans(lData.loans);
     }
+    if (reservationsRes.ok) {
+      const rData = (await reservationsRes.json()) as { reservations: ReservationRecord[] };
+      setReservations(rData.reservations);
+    }
     if (notifsRes.ok) {
       const nData = (await notifsRes.json()) as { notifications: LibraryNotification[] };
       setNotifications(nData.notifications);
     }
 
-    if (user.role === 'admin') {
-      const mRes = await fetch('/api/admin/members', { headers });
+    if (isAdminRole(user.role)) {
+      const [mRes, sRes] = await Promise.all([
+        fetch('/api/admin/members', { headers }),
+        fetch('/api/admin/staff', { headers }),
+      ]);
       if (mRes.ok) {
         const mData = (await mRes.json()) as { members: MemberSummaryRow[] };
         setMembers(mData.members);
+      }
+      if (sRes.ok) {
+        const sData = (await sRes.json()) as { staff: UserProfile[] };
+        setStaffAdmins(sData.staff);
       }
     }
   }, [token, user]);
@@ -130,7 +147,7 @@ export default function App() {
         };
         if (parsed.notifications && parsed.notifications.length > 0 && user) {
           const relevant = parsed.notifications.find(
-            (n) => user.role === 'admin' || n.userId === user.id
+            (n) => isAdminRole(user.role) || n.userId === user.id
           );
           if (relevant) {
             void sendPushNotification(relevant.title, relevant.message, relevant.id);
@@ -150,7 +167,7 @@ export default function App() {
   const handleAuthSuccess = (loggedUser: UserProfile, sessionToken: string) => {
     setUser(loggedUser);
     setToken(sessionToken);
-    if (loggedUser.role === 'admin') {
+    if (isAdminRole(loggedUser.role)) {
       setRoute('admin');
     } else {
       setRoute('member');
@@ -161,8 +178,10 @@ export default function App() {
     setUser(null);
     setToken(null);
     setLoans([]);
+    setReservations([]);
     setNotifications([]);
     setMembers([]);
+    setStaffAdmins([]);
     setRoute('opac');
   };
 
@@ -209,6 +228,45 @@ export default function App() {
     await refreshAll();
   };
 
+  const handleReserveBook = async (book: BookItem) => {
+    if (!token) {
+      openAuth('member');
+      throw new Error('Silakan masuk terlebih dahulu.');
+    }
+    const res = await fetch('/api/reservations', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ bookId: book.id }),
+    });
+    const data = (await res.json()) as { error?: string };
+    if (!res.ok) {
+      throw new Error(data.error || 'Gagal memesan buku.');
+    }
+    await refreshAll();
+  };
+
+  const handleCancelReservation = async (reservationId: string) => {
+    if (!token) return;
+    const res = await fetch(`/api/reservations/${encodeURIComponent(reservationId)}/cancel`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const data = (await res.json()) as { error?: string };
+      throw new Error(data.error || 'Gagal membatalkan reservasi.');
+    }
+    await refreshAll();
+  };
+
+  const handleBorrowReservedBook = async (bookId: string) => {
+    const book = books.find((b) => b.id === bookId);
+    if (!book) throw new Error('Buku tidak ditemukan.');
+    await handleBorrowBook(book);
+  };
+
   const handleMarkAllRead = async () => {
     if (!token) return;
     await fetch('/api/notifications/read-all', {
@@ -226,7 +284,8 @@ export default function App() {
     );
   };
 
-  const activeSummary = books.length > 0 ? summary : computeInventorySummary(books, loans);
+  const activeSummary =
+    books.length > 0 ? summary : computeInventorySummary(books, loans, new Date(), reservations);
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 pb-16 md:pb-0">
@@ -285,7 +344,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
-                if (!user || user.role !== 'admin') {
+                if (!user || !isAdminRole(user.role)) {
                   openAuth('admin');
                 } else {
                   setRoute('admin');
@@ -336,15 +395,19 @@ export default function App() {
               <div className="h-56 rounded-2xl bg-slate-200" />
             </div>
           </div>
-        ) : route === 'admin' && user?.role === 'admin' && token ? (
+        ) : route === 'admin' && isAdminRole(user?.role) && user && token ? (
           <AdminDashboardView
             books={books}
             loans={loans}
+            reservations={reservations}
             summary={activeSummary}
             notifications={notifications}
             members={members}
+            staffAdmins={staffAdmins}
+            currentUser={user}
             token={token}
             onRefreshAll={refreshAll}
+            onCancelReservation={handleCancelReservation}
             onShowLabel={setLabelBook}
             onReadPdf={setReadingBook}
           />
@@ -352,6 +415,7 @@ export default function App() {
           <MemberDashboardView
             user={user}
             loans={loans}
+            reservations={reservations}
             notifications={notifications}
             pushPermission={pushPermission}
             onEnablePush={requestPermission}
@@ -359,6 +423,8 @@ export default function App() {
             onOpenScanner={() => setScannerOpen(true)}
             onReturnLoan={handleReturnLoan}
             onPayFine={handlePayFine}
+            onCancelReservation={handleCancelReservation}
+            onBorrowReservedBook={handleBorrowReservedBook}
             onMarkAllRead={handleMarkAllRead}
           />
         ) : (
@@ -366,8 +432,11 @@ export default function App() {
             books={books}
             summary={activeSummary}
             user={user}
+            loans={loans}
+            reservations={reservations}
             onOpenScanner={() => setScannerOpen(true)}
             onBorrowDirect={(b) => handleBorrowBook(b)}
+            onReserveBook={handleReserveBook}
             onReadPdf={setReadingBook}
             onShowLabel={setLabelBook}
             onOpenAuth={() => openAuth('member')}
@@ -424,7 +493,7 @@ export default function App() {
         <button
           type="button"
           onClick={() =>
-            user?.role === 'admin' ? setRoute('admin') : openAuth('admin')
+            isAdminRole(user?.role) ? setRoute('admin') : openAuth('admin')
           }
           className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium ${
             route === 'admin' ? 'text-teal-700 font-semibold' : 'text-slate-600'

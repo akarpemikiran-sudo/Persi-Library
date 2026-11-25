@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BellRing,
+  BookmarkCheck,
   CheckCircle2,
   Clock,
   FileSpreadsheet,
@@ -9,8 +10,11 @@ import {
   Plus,
   QrCode,
   RotateCcw,
+  ShieldCheck,
+  ShieldPlus,
   Trash2,
   Users,
+  XCircle,
 } from 'lucide-react';
 import { evaluateLoan, formatRupiah, parseBooksCsv } from '../lib/libraryRules';
 import type {
@@ -20,6 +24,7 @@ import type {
   InventorySummary,
   LibraryNotification,
   LoanRecord,
+  ReservationRecord,
   UserProfile,
 } from '../lib/types';
 
@@ -32,16 +37,20 @@ interface MemberSummaryRow extends UserProfile {
 interface AdminDashboardViewProps {
   books: BookItem[];
   loans: LoanRecord[];
+  reservations: ReservationRecord[];
   summary: InventorySummary;
   notifications: LibraryNotification[];
   members: MemberSummaryRow[];
+  staffAdmins: UserProfile[];
+  currentUser: UserProfile;
   token: string;
   onRefreshAll: () => Promise<void>;
+  onCancelReservation: (reservationId: string) => Promise<void>;
   onShowLabel: (book: BookItem) => void;
   onReadPdf: (book: BookItem) => void;
 }
 
-type AdminTab = 'monitor' | 'inventory' | 'add_pdf' | 'bulk_csv' | 'members';
+type AdminTab = 'monitor' | 'inventory' | 'add_pdf' | 'bulk_csv' | 'members' | 'staff';
 
 const SAMPLE_CSV_TEMPLATE = `judul,penulis,isbn,penerbit,tahun,kategori,format,lokasi_rak,kode_aset,jumlah,kondisi,deskripsi
 "Sistem Informasi Perpustakaan Modern",Dr. Arif Wibowo,978-602-770-101-4,Pustaka Informatika,2026,Teknologi,hybrid,Rak B-08,AST-2026-101,5,Baik,"Panduan otomasi katalog dan sirkulasi QR."
@@ -51,11 +60,15 @@ const SAMPLE_CSV_TEMPLATE = `judul,penulis,isbn,penerbit,tahun,kategori,format,l
 export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   books,
   loans,
+  reservations,
   summary,
   notifications,
   members,
+  staffAdmins,
+  currentUser,
   token,
   onRefreshAll,
+  onCancelReservation,
   onShowLabel,
   onReadPdf,
 }) => {
@@ -64,6 +77,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     null
   );
   const [busyAction, setBusyAction] = useState(false);
+
+  // Staff Admin creation form state (Super Admin only)
+  const [staffName, setStaffName] = useState('');
+  const [staffEmail, setStaffEmail] = useState('');
+  const [staffPassword, setStaffPassword] = useState('');
 
   // Single Book + PDF Form State
   const [title, setTitle] = useState('');
@@ -302,19 +320,76 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  const handleCreateStaffAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusyAction(true);
+    setStatusBanner(null);
+    try {
+      const res = await fetch('/api/admin/staff', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: staffName,
+          email: staffEmail,
+          password: staffPassword,
+        }),
+      });
+      const data = (await res.json()) as { admin?: UserProfile; error?: string };
+      if (!res.ok || !data.admin) {
+        throw new Error(data.error || 'Gagal menambahkan akun admin staf.');
+      }
+      setStaffName('');
+      setStaffEmail('');
+      setStaffPassword('');
+      await onRefreshAll();
+      setStatusBanner({
+        type: 'ok',
+        text: `Akun Admin Staf "${data.admin.name}" (${data.admin.memberCode}) berhasil dibuat.`,
+      });
+    } catch (err) {
+      setStatusBanner({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Gagal membuat akun admin staf.',
+      });
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleAdminCancelReservation = async (reservationId: string) => {
+    setBusyAction(true);
+    setStatusBanner(null);
+    try {
+      await onCancelReservation(reservationId);
+      setStatusBanner({ type: 'ok', text: 'Reservasi buku telah dibatalkan.' });
+    } catch (err) {
+      setStatusBanner({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Gagal membatalkan reservasi.',
+      });
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Admin Header & Quick Entry Buttons */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white border border-slate-200 rounded-2xl p-6">
         <div>
           <p className="text-xs font-mono text-teal-800 font-semibold">
-            DASBOR ADMINISTRATOR &amp; INVENTARISASI ASET
+            {currentUser.role === 'super_admin'
+              ? `DASBOR SUPER ADMIN (${currentUser.memberCode})`
+              : `DASBOR ADMINISTRATOR (${currentUser.memberCode})`}
           </p>
           <h1 className="mt-1 text-2xl font-bold text-slate-900">
             Pusat Kendali Sirkulasi &amp; Koleksi PustakaKita
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Pantau status buku real-time, unggah koleksi PDF terproteksi, impor CSV massal, dan kelola denda otomatis.
+            Pantau status buku &amp; antrean reservasi real-time, unggah PDF terproteksi, impor CSV massal, dan kelola denda otomatis.
           </p>
         </div>
 
@@ -356,12 +431,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-500">Stok Eksemplar Cetak</p>
+          <p className="text-xs text-slate-500">Stok Eksemplar &amp; Reservasi</p>
           <p className="mt-1 text-2xl font-bold text-slate-900 tabular-nums">
             {summary.availablePhysicalCopies} / {summary.totalPhysicalCopies}
           </p>
           <p className="mt-1 text-xs text-slate-500 tabular-nums">
-            {summary.borrowedPhysicalCopies} sedang dipinjam
+            {summary.borrowedPhysicalCopies} dipinjam ·{' '}
+            <span className={summary.activeReservationsCount > 0 ? 'font-semibold text-amber-700' : ''}>
+              {summary.activeReservationsCount} dipesan
+            </span>
           </p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
@@ -393,6 +471,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             { id: 'add_pdf', label: 'Input Buku PDF' },
             { id: 'bulk_csv', label: 'Unggah Massal CSV' },
             { id: 'members', label: 'Daftar Anggota' },
+            { id: 'staff', label: 'Akun Admin' },
           ] as const
         ).map((tab) => (
           <button
@@ -552,10 +631,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           <div className="lg:col-span-4 bg-white border border-slate-200 rounded-2xl overflow-hidden flex flex-col">
             <div className="px-5 py-4 border-b border-slate-200">
               <h2 className="text-base font-bold text-slate-900">
-                Log Notifikasi Keterlambatan
+                Log Notifikasi Keterlambatan &amp; Reservasi
               </h2>
               <p className="text-xs text-slate-500">
-                Peringatan otomatis pengingat jatuh tempo &amp; denda.
+                Peringatan otomatis jatuh tempo, denda, dan reservasi anggota.
               </p>
             </div>
             <div className="divide-y divide-slate-100 max-h-[420px] overflow-y-auto">
@@ -571,7 +650,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         className={`text-xs font-semibold ${
                           n.type === 'overdue'
                             ? 'text-red-700'
-                            : n.type === 'due_soon'
+                            : n.type === 'due_soon' || n.type === 'reservation'
                               ? 'text-amber-700'
                               : 'text-teal-800'
                         }`}
@@ -591,6 +670,103 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               )}
             </div>
           </div>
+
+          {/* Real-Time Book Reservations Queue ("Dipesan") */}
+          <div className="lg:col-span-12 bg-white border border-slate-200 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <BookmarkCheck className="w-4 h-4 text-amber-700" />
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">
+                    Antrean Reservasi Buku OPAC (Status &lsquo;Dipesan&rsquo;)
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Pemantauan anggota yang memesan buku cetak saat seluruh eksemplar sedang dipinjam.
+                  </p>
+                </div>
+              </div>
+              <span className="text-xs font-mono font-semibold text-amber-800 tabular-nums">
+                {summary.activeReservationsCount} Reservasi Aktif
+              </span>
+            </div>
+
+            {reservations.length === 0 ? (
+              <p className="p-6 text-xs text-slate-500 text-center">
+                Belum ada antrean reservasi buku saat ini.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
+                      <th className="py-3 px-4 whitespace-nowrap">Pemesan</th>
+                      <th className="py-3 px-4 whitespace-nowrap">Buku &amp; Kode Aset</th>
+                      <th className="py-3 px-4 whitespace-nowrap">Waktu Pesan</th>
+                      <th className="py-3 px-4 whitespace-nowrap">Status Buku</th>
+                      <th className="py-3 px-4 text-right whitespace-nowrap">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {reservations.map((res) => (
+                      <tr key={res.id} className="hover:bg-slate-50/70">
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <p className="font-semibold text-slate-900">{res.memberName}</p>
+                          <p className="font-mono text-[11px] text-slate-500">{res.memberCode}</p>
+                        </td>
+                        <td className="py-3 px-4">
+                          <p className="font-semibold text-slate-900">{res.bookTitle}</p>
+                          <p className="font-mono text-[11px] text-slate-500">
+                            {res.bookAssetCode} · {res.rackLocation}
+                          </p>
+                        </td>
+                        <td className="py-3 px-4 font-mono tabular-nums text-slate-600 whitespace-nowrap">
+                          {new Date(res.reservedAt).toLocaleString('id-ID', {
+                            day: '2-digit',
+                            month: 'short',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center gap-1.5 font-semibold whitespace-nowrap ${
+                              res.status === 'waiting'
+                                ? 'text-amber-700'
+                                : res.status === 'ready'
+                                  ? 'text-emerald-700'
+                                  : 'text-slate-500'
+                            }`}
+                          >
+                            <BookmarkCheck className="w-3.5 h-3.5 shrink-0" />
+                            {res.status === 'waiting'
+                              ? 'Dipesan · Menunggu Kembali'
+                              : res.status === 'ready'
+                                ? 'Dipesan · Siap Diambil'
+                                : res.status === 'fulfilled'
+                                  ? 'Terpenuhi (Dipinjam)'
+                                  : 'Dibatalkan'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right whitespace-nowrap">
+                          {(res.status === 'waiting' || res.status === 'ready') && (
+                            <button
+                              type="button"
+                              disabled={busyAction}
+                              onClick={() => void handleAdminCancelReservation(res.id)}
+                              className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                              Batalkan
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -603,7 +779,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 Inventarisasi Aset Perpustakaan &amp; OPAC
               </h2>
               <p className="text-xs text-slate-500">
-                Kelola kode aset QR, barcode ISBN, lokasi rak cetak, kondisi fisik, dan akses PDF.
+                Kelola kode aset QR, barcode ISBN, lokasi rak cetak, status reservasi (&lsquo;Dipesan&rsquo;), kondisi fisik, dan akses PDF.
               </p>
             </div>
           </div>
@@ -611,85 +787,107 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
-                  <th className="py-3 px-4">Kode Aset &amp; Rak</th>
-                  <th className="py-3 px-4">Judul &amp; Penulis</th>
-                  <th className="py-3 px-4">Format</th>
-                  <th className="py-3 px-4">Stok</th>
-                  <th className="py-3 px-4">Kondisi Aset</th>
-                  <th className="py-3 px-4 text-right">Label &amp; Aksi</th>
+                  <th className="py-3 px-3 whitespace-nowrap">Kode Aset &amp; Rak</th>
+                  <th className="py-3 px-3 whitespace-nowrap">Judul &amp; Penulis</th>
+                  <th className="py-3 px-3 whitespace-nowrap">Format</th>
+                  <th className="py-3 px-3 whitespace-nowrap">Stok</th>
+                  <th className="py-3 px-3 whitespace-nowrap">Status OPAC</th>
+                  <th className="py-3 px-3 whitespace-nowrap">Kondisi Aset</th>
+                  <th className="py-3 px-3 text-right whitespace-nowrap">Label &amp; Aksi</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-xs">
-                {books.map((book) => (
-                  <tr key={book.id} className="hover:bg-slate-50/70">
-                    <td className="py-3 px-4">
-                      <p className="font-mono font-semibold text-slate-900">{book.assetCode}</p>
-                      <p className="text-[11px] text-slate-500">{book.rackLocation}</p>
-                    </td>
-                    <td className="py-3 px-4 max-w-[260px]">
-                      <p className="font-bold text-slate-900 truncate">{book.title}</p>
-                      <p className="text-[11px] text-slate-500 truncate">
-                        {book.author} · ISBN {book.isbn}
-                      </p>
-                    </td>
-                    <td className="py-3 px-4 text-slate-700">
-                      {book.format === 'digital_pdf'
-                        ? 'Digital PDF'
-                        : book.format === 'hybrid'
-                          ? 'Cetak + PDF'
-                          : 'Cetak OPAC'}
-                    </td>
-                    <td className="py-3 px-4 font-mono tabular-nums text-slate-800">
-                      {book.format === 'digital_pdf'
-                        ? 'Tak Terbatas'
-                        : `${book.availableCopies} / ${book.totalCopies}`}
-                    </td>
-                    <td className="py-3 px-4">
-                      <select
-                        aria-label={`Ubah kondisi aset ${book.title}`}
-                        value={book.condition}
-                        onChange={(e) =>
-                          void handleUpdateCondition(book.id, e.target.value as AssetCondition)
-                        }
-                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
-                      >
-                        <option value="Baik">Baik</option>
-                        <option value="Perlu Perawatan">Perlu Perawatan</option>
-                        <option value="Rusak">Rusak</option>
-                      </select>
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      <div className="inline-flex items-center gap-1.5">
-                        {book.hasPdf && (
+                {books.map((book) => {
+                  const resCount = book.activeReservationsCount ?? 0;
+                  return (
+                    <tr key={book.id} className="hover:bg-slate-50/70">
+                      <td className="py-3 px-3 whitespace-nowrap">
+                        <p className="font-mono font-semibold text-slate-900">{book.assetCode}</p>
+                        <p className="text-[11px] text-slate-500">{book.rackLocation}</p>
+                      </td>
+                      <td className="py-3 px-3 max-w-[230px]">
+                        <p className="font-bold text-slate-900 truncate">{book.title}</p>
+                        <p className="text-[11px] text-slate-500 truncate">
+                          {book.author} · ISBN {book.isbn}
+                        </p>
+                      </td>
+                      <td className="py-3 px-3 text-slate-700 whitespace-nowrap">
+                        {book.format === 'digital_pdf'
+                          ? 'Digital PDF'
+                          : book.format === 'hybrid'
+                            ? 'Cetak + PDF'
+                            : 'Cetak OPAC'}
+                      </td>
+                      <td className="py-3 px-3 font-mono tabular-nums text-slate-800 whitespace-nowrap">
+                        {book.format === 'digital_pdf'
+                          ? 'Tak Terbatas'
+                          : `${book.availableCopies} / ${book.totalCopies}`}
+                      </td>
+                      <td className="py-3 px-3 whitespace-nowrap">
+                        {resCount > 0 ? (
+                          <span className="inline-flex items-center gap-1 font-semibold text-amber-700 whitespace-nowrap">
+                            <BookmarkCheck className="w-3.5 h-3.5 shrink-0" />
+                            Dipesan ({resCount})
+                          </span>
+                        ) : book.format === 'digital_pdf' || book.availableCopies > 0 ? (
+                          <span className="inline-flex items-center gap-1 font-semibold text-emerald-700 whitespace-nowrap">
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                            Tersedia
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 font-semibold text-slate-600 whitespace-nowrap">
+                            <Clock className="w-3.5 h-3.5 shrink-0" />
+                            Dipinjam Semua
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-3 whitespace-nowrap">
+                        <select
+                          aria-label={`Ubah kondisi aset ${book.title}`}
+                          value={book.condition}
+                          onChange={(e) =>
+                            void handleUpdateCondition(book.id, e.target.value as AssetCondition)
+                          }
+                          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                        >
+                          <option value="Baik">Baik</option>
+                          <option value="Perlu Perawatan">Perlu Perawatan</option>
+                          <option value="Rusak">Rusak</option>
+                        </select>
+                      </td>
+                      <td className="py-3 px-3 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1.5">
+                          {book.hasPdf && (
+                            <button
+                              type="button"
+                              onClick={() => onReadPdf(book)}
+                              className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                            >
+                              Pratinjau PDF
+                            </button>
+                          )}
                           <button
                             type="button"
-                            onClick={() => onReadPdf(book)}
-                            className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                            onClick={() => onShowLabel(book)}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
                           >
-                            Pratinjau PDF
+                            <QrCode className="w-3.5 h-3.5 text-teal-700" />
+                            Label QR
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => onShowLabel(book)}
-                          className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
-                        >
-                          <QrCode className="w-3.5 h-3.5 text-teal-700" />
-                          Label QR
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busyAction}
-                          onClick={() => void handleDeleteBook(book.id, book.title)}
-                          aria-label={`Hapus ${book.title}`}
-                          className="p-1.5 rounded-md text-slate-400 hover:text-red-700 hover:bg-red-50 transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          <button
+                            type="button"
+                            disabled={busyAction}
+                            onClick={() => void handleDeleteBook(book.id, book.title)}
+                            aria-label={`Hapus ${book.title}`}
+                            className="p-1.5 rounded-md text-slate-400 hover:text-red-700 hover:bg-red-50 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1081,6 +1279,128 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 6: SUPER ADMIN & ADMIN STAFF ACCOUNTS */}
+      {activeTab === 'staff' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-teal-700" />
+              <div>
+                <h2 className="text-base font-bold text-slate-900">
+                  Daftar Akun Super Admin &amp; Staf Admin
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Akun yang berwenang mengakses Dasbor Admin dan sirkulasi PustakaKita.
+                </p>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
+                    <th className="py-3 px-4 whitespace-nowrap">Kode Staf</th>
+                    <th className="py-3 px-4 whitespace-nowrap">Nama &amp; Email</th>
+                    <th className="py-3 px-4 whitespace-nowrap">Peran</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-xs">
+                  {staffAdmins.map((staff) => (
+                    <tr key={staff.id}>
+                      <td className="py-3 px-4 font-mono font-semibold text-slate-900 whitespace-nowrap">
+                        {staff.memberCode}
+                      </td>
+                      <td className="py-3 px-4">
+                        <p className="font-semibold text-slate-900">{staff.name}</p>
+                        <p className="text-[11px] text-slate-500">{staff.email}</p>
+                      </td>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <span
+                          className={`font-semibold ${
+                            staff.role === 'super_admin' ? 'text-teal-800' : 'text-slate-700'
+                          }`}
+                        >
+                          {staff.role === 'super_admin' ? 'Super Admin' : 'Admin Staf'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-6 space-y-4">
+            <div className="flex items-center gap-2">
+              <ShieldPlus className="w-4 h-4 text-teal-700" />
+              <h2 className="text-base font-bold text-slate-900">Tambah Akun Admin Staf</h2>
+            </div>
+
+            {currentUser.role === 'super_admin' ? (
+              <form onSubmit={(e) => void handleCreateStaffAdmin(e)} className="space-y-3.5">
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Sebagai Super Admin, Anda dapat menambahkan akun staf pustakawan agar mereka dapat masuk menggunakan tombol &ldquo;Masuk Dasbor Admin&rdquo;.
+                </p>
+                <div>
+                  <label htmlFor="staff-name" className="block text-xs font-medium text-slate-700 mb-1">
+                    Nama Lengkap Staf
+                  </label>
+                  <input
+                    id="staff-name"
+                    type="text"
+                    required
+                    value={staffName}
+                    onChange={(e) => setStaffName(e.target.value)}
+                    placeholder="Pustakawan Sirkulasi"
+                    className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="staff-email" className="block text-xs font-medium text-slate-700 mb-1">
+                    Email Staf
+                  </label>
+                  <input
+                    id="staff-email"
+                    type="email"
+                    required
+                    value={staffEmail}
+                    onChange={(e) => setStaffEmail(e.target.value)}
+                    placeholder="staf@pustakakita.id"
+                    className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="staff-password" className="block text-xs font-medium text-slate-700 mb-1">
+                    Kata Sandi Awal (min. 6 karakter)
+                  </label>
+                  <input
+                    id="staff-password"
+                    type="password"
+                    required
+                    minLength={6}
+                    value={staffPassword}
+                    onChange={(e) => setStaffPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={busyAction}
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-teal-700 py-2.5 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-50 transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  {busyAction ? 'Menyimpan...' : 'Buat Akun Admin Staf'}
+                </button>
+              </form>
+            ) : (
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Hanya akun dengan peran <span className="font-semibold text-slate-900">Super Admin</span> yang berwenang menambahkan akun admin staf baru.
+              </p>
+            )}
           </div>
         </div>
       )}

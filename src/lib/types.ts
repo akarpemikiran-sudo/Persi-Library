@@ -1,8 +1,10 @@
-export type UserRole = 'admin' | 'member';
+export type UserRole = 'super_admin' | 'admin' | 'member';
 
 export type BookFormat = 'print' | 'digital_pdf' | 'hybrid';
 
 export type AssetCondition = 'Baik' | 'Perlu Perawatan' | 'Rusak';
+
+export type ReservationStatus = 'waiting' | 'ready' | 'fulfilled' | 'cancelled';
 
 export interface UserProfile {
   id: string;
@@ -29,6 +31,7 @@ export interface BookItem {
   condition: AssetCondition;
   totalCopies: number;
   availableCopies: number;
+  activeReservationsCount?: number;
   coverUrl: string;
   hasPdf: boolean;
   pageCount: number;
@@ -53,11 +56,32 @@ export interface LoanRecord {
   loanQrToken: string;
 }
 
+export interface ReservationRecord {
+  id: string;
+  bookId: string;
+  bookTitle: string;
+  bookAssetCode: string;
+  rackLocation: string;
+  memberId: string;
+  memberName: string;
+  memberCode: string;
+  reservedAt: string;
+  status: ReservationStatus;
+  notifiedReadyAt: string | null;
+}
+
 export interface LibraryNotification {
   id: string;
   userId: string;
   targetRole?: UserRole;
-  type: 'due_soon' | 'overdue' | 'borrow' | 'return' | 'fine_paid' | 'inventory';
+  type:
+    | 'due_soon'
+    | 'overdue'
+    | 'borrow'
+    | 'return'
+    | 'fine_paid'
+    | 'inventory'
+    | 'reservation';
   title: string;
   message: string;
   read: boolean;
@@ -84,5 +108,7 @@ export interface InventorySummary {
   activeLoansCount: number;
   overdueLoansCount: number;
   totalOutstandingFines: number;
+  activeReservationsCount: number;
+  reservedBooksCount: number;
   conditionCounts: Record<AssetCondition, number>;
 }

@@ -3,20 +3,28 @@ import {
   AlertTriangle,
   Bell,
   BellRing,
+  BookmarkCheck,
   CheckCircle2,
   Clock,
   CreditCard,
   QrCode,
   RotateCcw,
+  XCircle,
 } from 'lucide-react';
 import { evaluateLoan, FINE_RATE_PER_DAY, formatRupiah } from '../lib/libraryRules';
-import type { LibraryNotification, LoanRecord, UserProfile } from '../lib/types';
+import type {
+  LibraryNotification,
+  LoanRecord,
+  ReservationRecord,
+  UserProfile,
+} from '../lib/types';
 import type { PushPermissionState } from '../hooks/usePushNotifications';
 import { QrCodeImage } from './QrAndBarcodeVisuals';
 
 interface MemberDashboardViewProps {
   user: UserProfile;
   loans: LoanRecord[];
+  reservations: ReservationRecord[];
   notifications: LibraryNotification[];
   pushPermission: PushPermissionState;
   onEnablePush: () => Promise<PushPermissionState>;
@@ -24,12 +32,15 @@ interface MemberDashboardViewProps {
   onOpenScanner: () => void;
   onReturnLoan: (loanId: string) => Promise<void>;
   onPayFine: (loanId: string) => Promise<void>;
+  onCancelReservation: (reservationId: string) => Promise<void>;
+  onBorrowReservedBook: (bookId: string) => Promise<void>;
   onMarkAllRead: () => Promise<void>;
 }
 
 export const MemberDashboardView: React.FC<MemberDashboardViewProps> = ({
   user,
   loans,
+  reservations,
   notifications,
   pushPermission,
   onEnablePush,
@@ -37,9 +48,12 @@ export const MemberDashboardView: React.FC<MemberDashboardViewProps> = ({
   onOpenScanner,
   onReturnLoan,
   onPayFine,
+  onCancelReservation,
+  onBorrowReservedBook,
   onMarkAllRead,
 }) => {
   const [busyLoanId, setBusyLoanId] = useState<string | null>(null);
+  const [busyReservationId, setBusyReservationId] = useState<string | null>(null);
   const [bannerMsg, setBannerMsg] = useState<string | null>(null);
 
   const now = new Date();
@@ -48,6 +62,9 @@ export const MemberDashboardView: React.FC<MemberDashboardViewProps> = ({
   const totalUnpaidFine = loans.reduce(
     (acc, loan) => acc + evaluateLoan(loan, now).unpaidFine,
     0
+  );
+  const activeReservations = reservations.filter(
+    (r) => r.status === 'waiting' || r.status === 'ready'
   );
   const unreadNotifs = notifications.filter((n) => !n.read);
 
@@ -70,6 +87,28 @@ export const MemberDashboardView: React.FC<MemberDashboardViewProps> = ({
       setBannerMsg('Denda keterlambatan berhasil dilunasi.');
     } finally {
       setBusyLoanId(null);
+    }
+  };
+
+  const handleCancelRes = async (reservationId: string) => {
+    setBusyReservationId(reservationId);
+    setBannerMsg(null);
+    try {
+      await onCancelReservation(reservationId);
+      setBannerMsg('Reservasi buku telah dibatalkan.');
+    } finally {
+      setBusyReservationId(null);
+    }
+  };
+
+  const handleBorrowReserved = async (reservation: ReservationRecord) => {
+    setBusyReservationId(reservation.id);
+    setBannerMsg(null);
+    try {
+      await onBorrowReservedBook(reservation.bookId);
+      setBannerMsg(`Buku "${reservation.bookTitle}" berhasil dipinjam dari reservasi Anda.`);
+    } finally {
+      setBusyReservationId(null);
     }
   };
 
@@ -96,11 +135,17 @@ export const MemberDashboardView: React.FC<MemberDashboardViewProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-3 gap-4 pt-4 border-t border-slate-100">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-slate-100">
             <div>
               <p className="text-xs text-slate-500">Pinjaman Aktif</p>
               <p className="mt-1 text-2xl font-bold text-slate-900 tabular-nums">
                 {activeLoans.length}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Buku Dipesan</p>
+              <p className="mt-1 text-2xl font-bold text-amber-700 tabular-nums">
+                {activeReservations.length}
               </p>
             </div>
             <div>
@@ -184,6 +229,93 @@ export const MemberDashboardView: React.FC<MemberDashboardViewProps> = ({
           <span>{bannerMsg}</span>
         </div>
       )}
+
+      {/* Member Book Reservations */}
+      <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <BookmarkCheck className="w-4 h-4 text-amber-700" />
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">Reservasi Buku Saya</h2>
+              <p className="text-xs text-slate-500">
+                Daftar buku sedang dipinjam orang lain yang Anda pesan melalui katalog OPAC.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {reservations.length === 0 ? (
+          <div className="p-8 text-center text-xs text-slate-500">
+            Anda belum memiliki reservasi buku. Gunakan tombol &ldquo;Pesan Buku&rdquo; di katalog OPAC jika stok buku sedang dipinjam semua.
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {reservations.map((res) => (
+              <div
+                key={res.id}
+                className="px-6 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
+              >
+                <div className="min-w-0">
+                  <p className="text-xs font-mono text-slate-500">
+                    {res.bookAssetCode} · {res.rackLocation}
+                  </p>
+                  <h3 className="mt-0.5 text-sm font-bold text-slate-900 truncate">
+                    {res.bookTitle}
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-600 tabular-nums">
+                    Dipesan: {new Date(res.reservedAt).toLocaleDateString('id-ID')}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 shrink-0">
+                  <span
+                    className={`inline-flex items-center gap-1.5 text-xs font-semibold ${
+                      res.status === 'ready'
+                        ? 'text-emerald-700'
+                        : res.status === 'waiting'
+                          ? 'text-amber-700'
+                          : 'text-slate-500'
+                    }`}
+                  >
+                    <Clock className="w-3.5 h-3.5 shrink-0" />
+                    {res.status === 'ready'
+                      ? 'Dipesan · Siap Diambil'
+                      : res.status === 'waiting'
+                        ? 'Dipesan · Menunggu Kembali'
+                        : res.status === 'fulfilled'
+                          ? 'Sudah Dipinjam'
+                          : 'Dibatalkan'}
+                  </span>
+
+                  {res.status === 'ready' && (
+                    <button
+                      type="button"
+                      disabled={busyReservationId === res.id}
+                      onClick={() => void handleBorrowReserved(res)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-teal-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-teal-800 disabled:opacity-50 transition-colors whitespace-nowrap"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      Pinjam Sekarang
+                    </button>
+                  )}
+
+                  {(res.status === 'waiting' || res.status === 'ready') && (
+                    <button
+                      type="button"
+                      disabled={busyReservationId === res.id}
+                      onClick={() => void handleCancelRes(res.id)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors whitespace-nowrap"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      Batalkan
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* Active & Historical Loans */}
       <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">

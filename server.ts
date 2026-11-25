@@ -7,6 +7,7 @@ import { PDFDocument } from 'pdf-lib';
 import { createServer as createViteServer } from 'vite';
 import {
   computeInventorySummary,
+  isAdminRole,
   matchBookByScan,
   parseBooksCsv,
 } from './src/lib/libraryRules';
@@ -78,8 +79,18 @@ function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunctio
 
 function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
   requireAuth(req, res, () => {
-    if (req.user?.role !== 'admin') {
-      res.status(403).json({ error: 'Akses khusus Administrator perpustakaan.' });
+    if (!isAdminRole(req.user?.role)) {
+      res.status(403).json({ error: 'Akses khusus Administrator atau Super Admin perpustakaan.' });
+      return;
+    }
+    next();
+  });
+}
+
+function requireSuperAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+  requireAuth(req, res, () => {
+    if (req.user?.role !== 'super_admin') {
+      res.status(403).json({ error: 'Akses khusus Super Admin perpustakaan.' });
       return;
     }
     next();
@@ -128,15 +139,20 @@ async function startServer(): Promise<void> {
   // Public OPAC Catalog & live inventory metrics
   app.get('/api/catalog', (_req, res) => {
     const books = libraryStore.getBooks();
-    // Public summary counts (no PII)
-    const summary = computeInventorySummary(books, libraryStore.getLoansForUser({
+    const sysUser: UserProfile = {
       id: 'sys',
       name: 'System',
       email: '',
       memberCode: '',
-      role: 'admin',
+      role: 'super_admin',
       createdAt: '',
-    }));
+    };
+    const summary = computeInventorySummary(
+      books,
+      libraryStore.getLoansForUser(sysUser),
+      new Date(),
+      libraryStore.getReservationsForUser(sysUser)
+    );
     res.json({ books, summary });
   });
 
@@ -144,11 +160,12 @@ async function startServer(): Promise<void> {
   app.get('/api/auth/admin-status', (_req, res) => {
     res.json({
       claimed: libraryStore.isAdminClaimed(),
+      superAdminClaimed: libraryStore.isSuperAdminClaimed(),
       envConfigured: libraryStore.isAdminEnvConfigured(),
     });
   });
 
-  app.post('/api/auth/admin-claim', (req, res) => {
+  app.post('/api/auth/super-admin-register', (req, res) => {
     const { name, email, password } = req.body as {
       name?: string;
       email?: string;
@@ -156,22 +173,26 @@ async function startServer(): Promise<void> {
     };
     if (!name?.trim() || !email?.trim() || !password || password.length < 6) {
       res.status(400).json({
-        error: 'Nama, email, dan kata sandi (minimal 6 karakter) wajib diisi.',
+        error: 'Nama lengkap, email, dan kata sandi (minimal 6 karakter) wajib diisi.',
       });
       return;
     }
     try {
-      const admin = libraryStore.claimFirstAdmin(name, email, password);
-      const token = signSessionToken(admin.id, admin.role);
-      res.status(201).json({ user: admin, token });
+      const superAdmin = libraryStore.registerFirstSuperAdmin(name, email, password);
+      const token = signSessionToken(superAdmin.id, superAdmin.role);
+      res.status(201).json({ user: superAdmin, token });
     } catch (err) {
-      if (err instanceof Error && err.message === 'ADMIN_ALREADY_CLAIMED') {
+      if (err instanceof Error && err.message === 'SUPER_ADMIN_ALREADY_CLAIMED') {
         res.status(409).json({
-          error: 'Akun admin sudah diaktivasi sebelumnya. Silakan masuk dengan kredensial admin.',
+          error: 'Akun Super Admin sudah terdaftar. Silakan masuk menggunakan akun Super Admin atau Admin.',
         });
         return;
       }
-      res.status(500).json({ error: 'Gagal mengaktivasi akun admin.' });
+      if (err instanceof Error && err.message === 'EMAIL_EXISTS') {
+        res.status(409).json({ error: 'Alamat email sudah digunakan oleh akun lain.' });
+        return;
+      }
+      res.status(500).json({ error: 'Gagal mendaftarkan akun Super Admin.' });
     }
   });
 
@@ -206,9 +227,15 @@ async function startServer(): Promise<void> {
       password?: string;
       role?: 'admin' | 'member';
     };
-    const targetRole = role === 'admin' ? 'admin' : 'member';
-    if (!password || (targetRole === 'member' && !email?.trim())) {
+    const targetRole: 'admin' | 'member' = role === 'admin' ? 'admin' : 'member';
+    if (!password || (!libraryStore.isAdminEnvConfigured() && !email?.trim())) {
       res.status(400).json({ error: 'Email dan kata sandi wajib diisi.' });
+      return;
+    }
+    if (targetRole === 'admin' && !libraryStore.isSuperAdminClaimed()) {
+      res.status(403).json({
+        error: 'Akun Super Admin belum dibuat. Silakan daftarkan akun Super Admin terlebih dahulu.',
+      });
       return;
     }
     const user = libraryStore.authenticateUser(email ?? '', password, targetRole);
@@ -216,7 +243,7 @@ async function startServer(): Promise<void> {
       res.status(401).json({
         error:
           targetRole === 'admin'
-            ? 'Email atau kata sandi admin tidak sesuai.'
+            ? 'Email atau kata sandi admin / super admin tidak sesuai.'
             : 'Email atau kata sandi anggota tidak sesuai.',
       });
       return;
@@ -490,6 +517,76 @@ async function startServer(): Promise<void> {
 
   app.get('/api/admin/members', requireAdmin, (_req, res) => {
     res.json({ members: libraryStore.getMembersSummary() });
+  });
+
+  app.get('/api/admin/staff', requireAdmin, (_req, res) => {
+    res.json({ staff: libraryStore.getStaffAdmins() });
+  });
+
+  app.post('/api/admin/staff', requireSuperAdmin, (req, res) => {
+    const { name, email, password } = req.body as {
+      name?: string;
+      email?: string;
+      password?: string;
+    };
+    if (!name?.trim() || !email?.trim() || !password || password.length < 6) {
+      res.status(400).json({
+        error: 'Nama staf, email, dan kata sandi (minimal 6 karakter) wajib diisi.',
+      });
+      return;
+    }
+    try {
+      const admin = libraryStore.createStaffAdmin(name, email, password);
+      res.status(201).json({ admin });
+    } catch (err) {
+      if (err instanceof Error && err.message === 'EMAIL_EXISTS') {
+        res.status(409).json({ error: 'Email sudah digunakan oleh akun lain.' });
+        return;
+      }
+      res.status(500).json({ error: 'Gagal membuat akun admin staf.' });
+    }
+  });
+
+  // Book Reservations
+  app.get('/api/reservations', requireAuth, (req: AuthenticatedRequest, res) => {
+    res.json({ reservations: libraryStore.getReservationsForUser(req.user!) });
+  });
+
+  app.post('/api/reservations', requireAuth, (req: AuthenticatedRequest, res) => {
+    const { bookId } = req.body as { bookId?: string };
+    if (!bookId?.trim()) {
+      res.status(400).json({ error: 'ID buku wajib disertakan untuk reservasi.' });
+      return;
+    }
+    try {
+      const reservation = libraryStore.reserveBook(bookId.trim(), req.user!);
+      res.status(201).json({ reservation });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal membuat reservasi buku.';
+      if (msg === 'BOOK_NOT_FOUND') {
+        res.status(404).json({ error: 'Buku tidak ditemukan di katalog.' });
+        return;
+      }
+      res.status(409).json({ error: msg });
+    }
+  });
+
+  app.post('/api/reservations/:id/cancel', requireAuth, (req: AuthenticatedRequest, res) => {
+    try {
+      const reservation = libraryStore.cancelReservation(String(req.params.id), req.user!);
+      res.json({ reservation });
+    } catch (err) {
+      const code = err instanceof Error ? err.message : '';
+      if (code === 'RESERVATION_NOT_FOUND') {
+        res.status(404).json({ error: 'Data reservasi tidak ditemukan.' });
+        return;
+      }
+      if (code === 'FORBIDDEN') {
+        res.status(403).json({ error: 'Anda tidak berwenang membatalkan reservasi ini.' });
+        return;
+      }
+      res.status(400).json({ error: 'Reservasi sudah tidak aktif.' });
+    }
   });
 
   // Notifications
